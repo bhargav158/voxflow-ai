@@ -178,12 +178,10 @@ export class ConversationManager {
 
       const errReply = "Hmm, I had trouble processing that. Can you try again?";
       this._renderMessage('assistant', errReply);
-
-      this.isProcessing = false;
-      this.onStatusChange?.('error', 'Error');
-      setTimeout(() => this.onStatusChange?.('ready', 'Ready'), 3000);
-
       return errReply;
+    } finally {
+      this.isProcessing = false;
+      this.onStatusChange?.('ready', 'Ready');
     }
   }
 
@@ -376,6 +374,11 @@ export class ConversationManager {
       if (resp.ok) {
         // Update the card UI
         this._updateActionCard(card, 'confirmed', data.result?.message || 'Action completed!');
+        
+        // If the backend provided a deep link (like wa.me), open it!
+        if (data.result?.url) {
+          window.open(data.result.url, '_blank');
+        }
       } else {
         this._updateActionCard(card, 'error', data.error || 'Failed to confirm.');
       }

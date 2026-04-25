@@ -24,6 +24,7 @@ const INTENTS = [
   { name: 'reminder',     patterns: [/\b(remind|reminder|set a reminder|don.t forget)\b/i] },
   { name: 'schedule',     patterns: [/\b(schedule|meeting|appointment|calendar|event|book a)\b/i] },
   { name: 'email',        patterns: [/\b(email|send.*mail|compose.*email|write.*email|apply.*leave|seek.*leave|request.*leave)\b/i] },
+  { name: 'whatsapp',     patterns: [/\b(whatsapp|send.*whatsapp|wa\.me|wa)\b/i] },
   { name: 'search',       patterns: [/\b(search|look up|find|google|look for|search for)\b/i] },
   { name: 'joke',         patterns: [/\b(joke|funny|make me laugh|tell me something funny)\b/i] },
   { name: 'name',         patterns: [/\b(your name|who are you|what are you|introduce yourself)\b/i] },
@@ -45,7 +46,7 @@ const KNOWLEDGE_INTENTS = new Set([
 ]);
 
 const ACTION_INTENTS = new Set([
-  'reminder', 'schedule', 'email', 'note',
+  'reminder', 'schedule', 'email', 'note', 'whatsapp',
 ]);
 
 const GENERAL_INTENTS = new Set([
@@ -86,6 +87,7 @@ export function detectIntent(message) {
       weather: ['weather', 'temperature', 'forecast', 'rain', 'sunny', 'climate', 'hot', 'cold'],
       schedule: ['schedule', 'meeting', 'appointment', 'calendar', 'event', 'book'],
       email: ['email', 'mail', 'compose', 'inbox'],
+      whatsapp: ['whatsapp', 'message', 'msg'],
       reminder: ['remind', 'reminder', 'alert', 'notify', 'forget'],
       search: ['search', 'look', 'find', 'google', 'know'],
       joke: ['joke', 'funny', 'laugh'],

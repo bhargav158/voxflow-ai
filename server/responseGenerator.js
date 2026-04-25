@@ -21,10 +21,30 @@ let llmClient = null;
  * Called once at server startup.
  */
 export async function initLLM() {
+  const isOpenRouter = !!process.env.OPENROUTER_API_KEY;
   const isGroq = !!process.env.GROQ_API_KEY;
   const isGemini = !!process.env.GEMINI_API_KEY;
 
-  if (isGroq) {
+  if (isOpenRouter) {
+    try {
+      const { default: Groq } = await import('groq-sdk');
+      llmClient = {
+        client: new Groq({ 
+          apiKey: process.env.OPENROUTER_API_KEY, 
+          baseURL: "https://openrouter.ai/api/v1",
+          defaultHeaders: {
+            "HTTP-Referer": "http://localhost:3000",
+            "X-Title": "VoxFlow"
+          }
+        }),
+        type: 'openrouter'
+      };
+      console.log('[VoxFlow] ✅ OpenRouter LLM initialized');
+      return true;
+    } catch (err) {
+      console.warn('[VoxFlow] ⚠️ OpenRouter initialization failed:', err.message);
+    }
+  } else if (isGroq) {
     try {
       const { default: Groq } = await import('groq-sdk');
       llmClient = {
@@ -125,7 +145,27 @@ async function llmGenerate({ queryType, intent, message, contextText, memoryCont
   try {
     const fullPrompt = `${SYSTEM_PROMPT}\n\n${prompt}`;
     let chat;
-    if (llmClient.type === 'groq') {
+    if (llmClient.type === 'openrouter') {
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "http://localhost:3000",
+          "X-Title": "VoxFlow"
+        },
+        body: JSON.stringify({
+          model: "google/gemma-3-27b-it:free",
+          messages: [{ role: "user", content: fullPrompt }],
+          temperature: 0.3
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`OpenRouter API error: ${response.status} ${await response.text()}`);
+      }
+      const data = await response.json();
+      return { isStream: false, reply: data.choices[0].message.content };
+    } else if (llmClient.type === 'groq') {
       // Groq does not support stream in the same way here easily, so we fallback to standard 
       const response = await llmClient.client.chat.completions.create({
         messages: [{ role: 'user', content: fullPrompt }],
