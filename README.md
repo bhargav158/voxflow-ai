@@ -17,6 +17,7 @@ It combines:
   2. direct Qdrant search from Node,
   3. in-memory fallback knowledge base.
 - Action flow with explicit user confirmation before execution (reminders, email, schedule, notes, WhatsApp).
+- Mail intelligence: fetch recent inbox emails and generate person-wise discussion/deliverable summaries.
 - 3-tier memory system:
   - short-term turn buffer,
   - long-term summarized memory in Qdrant,
@@ -110,6 +111,17 @@ DEBUG_MODE=false
 # Email action (optional)
 SMTP_USER=
 SMTP_PASS=
+
+# Inbox reading and analysis (IMAP)
+EMAIL_IMAP_HOST=
+EMAIL_IMAP_PORT=993
+EMAIL_IMAP_SECURE=true
+EMAIL_IMAP_MAILBOX=INBOX
+EMAIL_ADDRESS=
+EMAIL_APP_PASSWORD=
+
+# OpenRouter model for email analysis
+OPENROUTER_MODEL=google/gemma-3-27b-it:free
 ```
 
 ### Variable notes
@@ -120,6 +132,8 @@ SMTP_PASS=
 - `PYTHON_QDRANT_URL` enables Python `/ask` retrieval route (default `http://127.0.0.1:8001`).
 - `VAPI_*` controls whether frontend uses Vapi voice vs browser Web Speech fallback.
 - `SMTP_*` enables real email sending on approved email actions.
+- `EMAIL_IMAP_*` + `EMAIL_ADDRESS` + `EMAIL_APP_PASSWORD` enable inbox fetch and analysis endpoints.
+- `OPENROUTER_MODEL` controls which OpenRouter model summarizes email threads.
 
 ## Local development
 
@@ -198,6 +212,19 @@ Actions are prepared first and executed only after confirmation.
 - `GET /api/health`
 - `GET /api/health/retrieval`
 - `GET /api/health/memory`
+
+### Email insights
+
+- `GET /api/email/recent?days=7&limit=25`
+  - Fetches latest inbox emails from the given window.
+- `GET /api/email/person-summary?email=person@example.com&days=30&limit=120`
+  - Filters threads involving a person and generates OpenRouter summary:
+    - discussion topics
+    - completed deliverables
+    - pending deliverables
+    - decisions
+    - action items
+    - blockers/risks
 
 ### Python retrieval service
 

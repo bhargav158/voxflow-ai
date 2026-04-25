@@ -22,6 +22,7 @@ import {
 } from './sessionStore.js';
 import { executeConfirmedAction } from './actionExecutor.js';
 import { onReminderFired, getReminders } from './reminderStore.js';
+import { getRecentEmails, analyzeEmailsForPerson } from './emailInsights.js';
 
 const app = express();
 const PORT = 3001;
@@ -248,6 +249,49 @@ app.get('/api/reminders', (req, res) => {
   const sessionId = req.query.sessionId || 'default';
   const reminders = getReminders(sessionId);
   res.json({ reminders });
+});
+
+// ══════════════════════════════════════════════════════════════
+// ── Email Insights Endpoints ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+app.get('/api/email/recent', async (req, res) => {
+  try {
+    const days = Number(req.query.days || 7);
+    const limit = Number(req.query.limit || 25);
+    const data = await getRecentEmails({ days, limit });
+    res.json({ status: 'ok', ...data });
+  } catch (err) {
+    console.error('[VoxFlow] Recent emails error:', err);
+    res.status(500).json({
+      status: 'error',
+      error: err?.message || 'Failed to fetch recent emails.',
+    });
+  }
+});
+
+app.get('/api/email/person-summary', async (req, res) => {
+  try {
+    const personEmail = String(req.query.email || '').trim();
+    const days = Number(req.query.days || 30);
+    const limit = Number(req.query.limit || 120);
+
+    if (!personEmail) {
+      return res.status(400).json({
+        status: 'error',
+        error: 'Missing query param: email',
+      });
+    }
+
+    const data = await analyzeEmailsForPerson({ personEmail, days, limit });
+    res.json({ status: 'ok', ...data });
+  } catch (err) {
+    console.error('[VoxFlow] Person email summary error:', err);
+    res.status(500).json({
+      status: 'error',
+      error: err?.message || 'Failed to analyze person emails.',
+    });
+  }
 });
 
 
