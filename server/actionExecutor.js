@@ -145,3 +145,35 @@ export function getAvailableActions() {
     icon: val.icon,
   }));
 }
+export function executeAction(action) {
+  switch (action.type) {
+
+    case "REMINDER":
+      setReminder(action);
+      break;
+
+    case "EMAIL":
+      console.log("📧 Email:", action);
+      break;
+
+    default:
+      console.log("❌ Unknown action:", action);
+  }
+}
+function setReminder(action) {
+  const reminderTime = new Date(action.time).getTime();
+  const now = Date.now();
+
+  const delay = reminderTime - now;
+
+  if (delay <= 0) {
+    console.log("⚠️ Time already passed");
+    return;
+  }
+
+  console.log(`⏰ Reminder set for ${action.message} at ${action.time}`);
+
+  setTimeout(() => {
+    console.log(`🔔 REMINDER: ${action.message}`);
+  }, delay);
+}

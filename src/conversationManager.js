@@ -4,17 +4,20 @@
  * Displays tool-usage badges, source citations, action confirmation cards,
  * and optional debug panel on assistant messages.
  */
+import { parseAIResponse } from './actions/responseParser.js';
+import { chunkActions } from './utils/chunker.js';
+// const { chunkActions } = require('./utils/chunker');
+// import { parseAIResponse } from "./actions/actionParser.js";
+import { executeAction } from "./actions/actionExecutor.js";
 
 const MAX_HISTORY = 20;
 
-// Tool badge config
 const TOOL_BADGES = {
   retrieval: { icon: '🔍', label: 'Retrieved', className: 'badge-retrieval' },
   api:       { icon: '⚡', label: 'Action',    className: 'badge-api' },
   reasoning: { icon: '🧠', label: 'Reasoning', className: 'badge-reasoning' },
 };
 
-// Query type labels
 const QUERY_TYPE_LABELS = {
   KNOWLEDGE: { icon: '📚', label: 'Knowledge' },
   ACTION:    { icon: '⚙️', label: 'Action' },
@@ -31,31 +34,26 @@ export class ConversationManager {
     this.sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  /** Toggle debug mode */
   setDebugMode(enabled) {
     this.debugMode = enabled;
-    // Toggle visibility of existing debug panels
     document.querySelectorAll('.debug-panel').forEach(el => {
       el.classList.toggle('hidden', !enabled);
     });
   }
 
-  /** Send user message, get assistant reply */
   async send(userText) {
     if (!userText.trim() || this.isProcessing) return null;
 
     this.isProcessing = true;
     this.onStatusChange?.('processing', 'Thinking...');
 
-    // Add user message to history + UI
     this.history.push({ role: 'user', content: userText.trim() });
     this._renderMessage('user', userText.trim());
 
-    // Show typing indicator
     const typingEl = this._showTypingIndicator();
 
     try {
-      const response = await fetch('/api/chat', {
+      const response = await fetch('http://localhost:3002/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -70,12 +68,34 @@ export class ConversationManager {
 
       const data = await response.json();
       const reply = data.reply || "Sorry, I didn't quite catch that.";
+      // STEP 1: Parse AI response
+      const parsed = parseAIResponse(reply);
 
-      // Remove typing indicator
+      // STEP 2: Chunk actions
+      const actions = chunkActions(parsed);
+
+      console.log("🧠 Parsed:", parsed);
+      console.log("⚡ Actions:", actions);
+      import { executeAction } from './actionExecutor';
+
+      actions.forEach(action => {
+        executeAction(action.payload);
+      });
       typingEl.remove();
 
-      // Add assistant reply
+      const parsedResponse = parseAIResponse(reply);
+
+      // 👇 THIS is where chunker comes
+      const actions = chunkActions(parsedResponse);
+
+      // Execute all actions
+      for (const action of actions) {
+        const result = await executeAction(action);
+        console.log("Action Result:", result);
+      }
+
       this.history.push({ role: 'assistant', content: reply });
+
       this._renderMessage('assistant', reply, {
         action: data.action,
         toolUsed: data.toolUsed,
@@ -88,6 +108,7 @@ export class ConversationManager {
       this.onStatusChange?.('ready', 'Ready');
 
       return reply;
+
     } catch (err) {
       console.error('[VoxFlow] Chat error:', err);
       typingEl.remove();
@@ -97,14 +118,13 @@ export class ConversationManager {
 
       this.isProcessing = false;
       this.onStatusChange?.('error', 'Error');
-
-      // Reset status after a moment
       setTimeout(() => this.onStatusChange?.('ready', 'Ready'), 3000);
 
       return errReply;
     }
   }
 
+  
   /** Render a chat bubble */
   _renderMessage(role, text, meta = {}) {
     const msgEl = document.createElement('div');

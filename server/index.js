@@ -9,10 +9,15 @@
  *   GET  /api/health         → Health check
  */
 
+import dotenv from "dotenv";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+dotenv.config({ path: "./.env" });
+
+console.log("✅ Loaded API KEY:", process.env.GEMINI_API_KEY);
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 import express from 'express';
 import cors from 'cors';
-import { orchestrate } from './orchestrator.js';
-import { initLLM, isLLMAvailable } from './responseGenerator.js';
 import { initQdrant, isQdrantReady, getRetrievalHealth } from './retriever.js';
 import {
   getSession,
@@ -22,55 +27,116 @@ import {
 import { executeConfirmedAction } from './actionExecutor.js';
 
 const app = express();
-const PORT = 3001;
+const PORT = 3002;
 
 app.use(cors());
 app.use(express.json());
 
 // ── Load .env if available ──
-try {
-  const dotenv = await import('dotenv');
-  const configFn = dotenv.config || dotenv.default?.config;
-  if (configFn) {
-    configFn({ path: new URL('../.env', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1') });
-  }
-} catch {
-  // dotenv not installed — no problem, continue without it
-}
 
 // ── Initialize services on startup ──
-await initLLM();
+
 await initQdrant();
 
+async function getGeminiResponse(userText) {
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `
+You are an AI assistant.
+
+If the user asks to perform an action, respond ONLY in JSON format like this:
+
+[
+  {
+    "type": "EMAIL",
+    "to": "example@gmail.com",
+    "message": "Hello..."
+  }
+]
+
+If no action is needed, respond like:
+{
+  "type": "NONE",
+  "message": "your answer"
+}
+
+User input: ${userText}
+`;
+const prompt = `
+You are an AI assistant.
+
+If the user asks to perform an action, respond ONLY in JSON.
+
+Examples:
+
+Reminder:
+{
+  "type": "REMINDER",
+  "message": "Call John",
+  "time": "2026-04-25T18:00:00"
+}
+
+Email:
+{
+  "type": "EMAIL",
+  "to": "example@gmail.com",
+  "message": "Hello..."
+}
+
+If no action:
+{
+  "type": "NONE",
+  "message": "your answer"
+}
+
+User input: ${userText}
+`;
+const result = await model.generateContent(prompt);
+  const response = await result.response;
+
+  return response.text();
+}
 
 // ══════════════════════════════════════════════════════════════
 // ── POST /api/chat — Main Conversation Endpoint ─────────────
 // ══════════════════════════════════════════════════════════════
 
-app.post('/api/chat', async (req, res) => {
+app.post("/api/chat", async (req, res) => {
+  console.log("🔥 GEMINI ROUTE HIT");
   try {
-    const { message, history, sessionId, debug } = req.body;
+    const { message } = req.body;
 
-    if (!message || typeof message !== 'string') {
-      return res.status(400).json({ error: 'Missing or invalid message.' });
+    console.log("User:", message);
+
+    const generatedText = await getGeminiResponse(message);
+
+    console.log("AI:", generatedText);
+
+    let finalReply;
+
+    try {
+      const parsed = JSON.parse(generatedText);
+
+      if (parsed.type === "NONE") {
+        finalReply = parsed.message;
+      } else {
+        finalReply = JSON.stringify(parsed);
+      }
+    } catch {
+      finalReply = generatedText;
     }
 
-    const enableDebug = debug === true || process.env.DEBUG_MODE === 'true';
-
-    const response = await orchestrate({
-      message: message.trim(),
-      history: history || [],
-      sessionId: sessionId || 'default',
-      debug: enableDebug,
+    res.json({
+      reply: finalReply
     });
 
-    res.json(response);
   } catch (err) {
-    console.error('[VoxFlow] Server error:', err);
-    res.status(500).json({ error: 'Internal server error.' });
+    console.error(err);
+    res.status(500).json({
+      reply: "Error getting AI response"
+    });
   }
 });
-
 
 // ══════════════════════════════════════════════════════════════
 // ── POST /api/action/confirm — Confirm a Pending Action ─────
@@ -175,7 +241,7 @@ app.get('/api/health', async (req, res) => {
     version: '3.1.0',
     architecture: 'Orchestrator Pipeline',
     tools: ['retrieval', 'api', 'reasoning'],
-    llmAvailable: isLLMAvailable(),
+    llmAvailable: true,
     qdrantReady: isQdrantReady(),
     retrieval,
     vapiEnabled: !!(process.env.VAPI_PUBLIC_KEY && process.env.VAPI_ASSISTANT_ID),
@@ -204,9 +270,7 @@ app.listen(PORT, () => {
   const vapiStatus = process.env.VAPI_PUBLIC_KEY ? '✅ Vapi Voice' : '⚠️ Vapi not configured (browser fallback)';
   const qdrantStatus = isQdrantReady() ? '✅ Python Qdrant backend' : '⚠️ Qdrant not available (in-memory fallback)';
 
-  console.log(`[VoxFlow] 🚀 Orchestrator API v3.1 running on http://localhost:${PORT}`);
-  console.log(`[VoxFlow] 🔧 Pipeline: Intent → Classify → Route → Generate`);
-  console.log(`[VoxFlow] 🛠️  Tools: Retrieval | API | Reasoning`);
+  console.log(`🔥 GEMINI SERVER running on http://localhost:${PORT}`);
   console.log(`[VoxFlow] 🎙️  Voice: ${vapiStatus}`);
   console.log(`[VoxFlow] 🔍 Search: ${qdrantStatus}`);
 });
