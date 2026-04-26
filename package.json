@@ -8,7 +8,7 @@
     "dev:clean": "kill-port 3001 5173 5174 8001",
     "dev:frontend": "vite",
     "dev:backend": "nodemon --watch server --ext js --exec \"node server/index.js\"",
-    "dev:python": "cd qdrant && uvicorn main:app --reload --port 8001",
+    "dev:python": "cd qdrant && ..\\.venv\\Scripts\\python.exe -m uvicorn main:app --reload --port 8001",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -18,7 +18,13 @@
     "@vapi-ai/web": "^2.5.2",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "googleapis": "^171.4.0",
+    "groq-sdk": "^1.1.2",
+    "imapflow": "^1.3.2",
+    "mailparser": "^3.9.8",
+    "nodemailer": "^8.0.5",
+    "vite-plugin-pwa": "^1.2.0"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

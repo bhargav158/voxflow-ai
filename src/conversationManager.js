@@ -7,14 +7,13 @@
 
 const MAX_HISTORY = 20;
 
-// Tool badge config
 const TOOL_BADGES = {
   retrieval: { icon: '🔍', label: 'Retrieved', className: 'badge-retrieval' },
   api:       { icon: '⚡', label: 'Action',    className: 'badge-api' },
   reasoning: { icon: '🧠', label: 'Reasoning', className: 'badge-reasoning' },
+  memory:    { icon: '💾', label: 'Memory',    className: 'badge-memory' },
 };
 
-// Query type labels
 const QUERY_TYPE_LABELS = {
   KNOWLEDGE: { icon: '📚', label: 'Knowledge' },
   ACTION:    { icon: '⚙️', label: 'Action' },
@@ -28,30 +27,38 @@ export class ConversationManager {
     this.history = [];
     this.isProcessing = false;
     this.debugMode = false;
-    this.sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Persistent sessionId — survives page reloads via localStorage
+    let storedId = null;
+    try {
+      storedId = localStorage.getItem('voxflow-session-id');
+    } catch {}
+    if (storedId) {
+      this.sessionId = storedId;
+    } else {
+      this.sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      try {
+        localStorage.setItem('voxflow-session-id', this.sessionId);
+      } catch {}
+    }
   }
 
-  /** Toggle debug mode */
   setDebugMode(enabled) {
     this.debugMode = enabled;
-    // Toggle visibility of existing debug panels
     document.querySelectorAll('.debug-panel').forEach(el => {
       el.classList.toggle('hidden', !enabled);
     });
   }
 
-  /** Send user message, get assistant reply */
   async send(userText) {
     if (!userText.trim() || this.isProcessing) return null;
 
     this.isProcessing = true;
     this.onStatusChange?.('processing', 'Thinking...');
 
-    // Add user message to history + UI
     this.history.push({ role: 'user', content: userText.trim() });
     this._renderMessage('user', userText.trim());
 
-    // Show typing indicator
     const typingEl = this._showTypingIndicator();
 
     try {
@@ -68,43 +75,117 @@ export class ConversationManager {
 
       if (!response.ok) throw new Error(`Server error: ${response.status}`);
 
-      const data = await response.json();
-      const reply = data.reply || "Sorry, I didn't quite catch that.";
 
-      // Remove typing indicator
-      typingEl.remove();
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('text/event-stream')) {
+        typingEl.remove();
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        
+        let metadata = {};
+        let replyText = '';
+        let msgEl = null;
+        let textNode = null;
+        let buffer = '';
 
-      // Add assistant reply
-      this.history.push({ role: 'assistant', content: reply });
-      this._renderMessage('assistant', reply, {
-        action: data.action,
-        toolUsed: data.toolUsed,
-        queryType: data.queryType,
-        sources: data.sources,
-        debug: data.debug,
-      });
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop(); // Keep the last incomplete part in the buffer
+          
+          for (const part of parts) {
+            const lines = part.split('\n');
+            let eventType = null;
+            let eventData = null;
+            
+            for (const line of lines) {
+              if (line.startsWith('event: ')) {
+                eventType = line.substring(7);
+              } else if (line.startsWith('data: ')) {
+                try {
+                  eventData = JSON.parse(line.substring(6));
+                } catch(e) {}
+              }
+            }
+            
+            if (eventType === 'metadata' && eventData) {
+              metadata = eventData;
+              msgEl = this._renderMessage('assistant', '', {
+                action: metadata.action,
+                toolUsed: metadata.toolUsed,
+                queryType: metadata.queryType,
+                sources: metadata.sources,
+                debug: metadata.debug,
+              });
+              textNode = msgEl.querySelector('.chat-text');
+            } else if (eventType === 'chunk' && eventData && eventData.text) {
+              replyText += eventData.text;
+              if (textNode) {
+                textNode.innerHTML = this._escapeHtml(replyText);
+              }
+              this._scrollToBottom();
+            } else if (eventType === 'done') {
+              // stream finished
+            } else if (eventType === 'error') {
+              throw new Error('Stream error');
+            }
+          }
+        }
+        
+        this.history.push({ role: 'assistant', content: replyText });
+        this.isProcessing = false;
+        this.onStatusChange?.('ready', 'Ready');
 
-      this.isProcessing = false;
-      this.onStatusChange?.('ready', 'Ready');
+        // Update memory indicator if memory was used
+        if (metadata.memoryUsed && msgEl) {
+          this._addMemoryIndicator(msgEl, metadata.memoryCount);
+        }
 
-      return reply;
+
+        return replyText;
+      } else {
+        const data = await response.json();
+        const reply = data.reply || "Sorry, I didn't quite catch that.";
+
+
+        typingEl.remove();
+        this.history.push({ role: 'assistant', content: reply });
+        const msgEl = this._renderMessage('assistant', reply, {
+          action: data.action,
+          toolUsed: data.toolUsed,
+          queryType: data.queryType,
+          sources: data.sources,
+          debug: data.debug,
+          memoryUsed: data.memoryUsed,
+          memoryCount: data.memoryCount,
+        });
+
+        if (data.memoryUsed && msgEl) {
+          this._addMemoryIndicator(msgEl, data.memoryCount);
+        }
+
+        this.isProcessing = false;
+        this.onStatusChange?.('ready', 'Ready');
+        return reply;
+      }
+
     } catch (err) {
       console.error('[VoxFlow] Chat error:', err);
       typingEl.remove();
 
       const errReply = "Hmm, I had trouble processing that. Can you try again?";
       this._renderMessage('assistant', errReply);
-
-      this.isProcessing = false;
-      this.onStatusChange?.('error', 'Error');
-
-      // Reset status after a moment
-      setTimeout(() => this.onStatusChange?.('ready', 'Ready'), 3000);
-
       return errReply;
+    } finally {
+      this.isProcessing = false;
+      this.onStatusChange?.('ready', 'Ready');
     }
   }
 
+  
   /** Render a chat bubble */
   _renderMessage(role, text, meta = {}) {
     const msgEl = document.createElement('div');
@@ -114,44 +195,40 @@ export class ConversationManager {
       const badgeHtml = this._renderToolBadge(meta.toolUsed, meta.queryType);
       const sourcesHtml = this._renderSources(meta.sources);
       const actionHtml = meta.action ? this._renderActionCard(meta.action) : '';
+      const reminderHtml = meta.isReminder ? this._renderReminderButtons(meta.reminderId) : '';
       const debugHtml = this._renderDebugPanel(meta.debug);
 
       msgEl.innerHTML = `
         <div class="message-avatar">
-          <svg viewBox="0 0 32 32" fill="none">
-            <circle cx="16" cy="16" r="14" stroke="url(#avatarGrad)" stroke-width="2" fill="none"/>
-            <circle cx="16" cy="16" r="4" fill="url(#avatarGrad)"/>
-            <defs>
-              <linearGradient id="avatarGrad" x1="0" y1="0" x2="32" y2="32">
-                <stop offset="0%" stop-color="#6C63FF"/>
-                <stop offset="100%" stop-color="#00D4AA"/>
-              </linearGradient>
-            </defs>
-          </svg>
+          <img src="/logo.jpeg" alt="VoxFlow" class="avatar-logo" />
         </div>
         <div class="message-content">
           ${badgeHtml}
-          <p>${this._escapeHtml(text)}</p>
+          <p class="chat-text">${this._escapeHtml(text)}</p>
           ${actionHtml}
+          ${reminderHtml}
           ${sourcesHtml}
           ${debugHtml}
         </div>
       `;
 
-      // Bind action button handlers after inserting into DOM
       if (meta.action) {
         setTimeout(() => this._bindActionButtons(msgEl, meta.action), 0);
+      }
+      if (meta.isReminder) {
+        setTimeout(() => this._bindReminderButtons(msgEl, meta.reminderId), 0);
       }
     } else {
       msgEl.innerHTML = `
         <div class="message-content">
-          <p>${this._escapeHtml(text)}</p>
+          <p class="chat-text">${this._escapeHtml(text)}</p>
         </div>
       `;
     }
 
     this.chatContainer.appendChild(msgEl);
     this._scrollToBottom();
+    return msgEl;
   }
 
   /** Render tool-used badge with query type */
@@ -169,6 +246,16 @@ export class ConversationManager {
     }
 
     return html ? `<div class="badge-row">${html}</div>` : '';
+  }
+
+  /** Add a memory indicator to a message element */
+  _addMemoryIndicator(msgEl, count) {
+    const content = msgEl.querySelector('.message-content');
+    if (!content) return;
+    const indicator = document.createElement('div');
+    indicator.className = 'memory-indicator';
+    indicator.innerHTML = `<span class="memory-indicator-icon">🧠</span> <span class="memory-indicator-text">Used ${count} memor${count === 1 ? 'y' : 'ies'} from past conversations</span>`;
+    content.appendChild(indicator);
   }
 
   /** Render source citations */
@@ -191,6 +278,27 @@ export class ConversationManager {
       ? this._renderActionDetails(action.details)
       : '';
 
+    let optionsHtml = '';
+    if (action.options && action.status === 'needs_disambiguation') {
+      optionsHtml = `<div class="action-options-list" style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px;">`;
+      action.options.forEach((opt) => {
+        optionsHtml += `<button class="action-btn select-option" style="text-align: left; background: rgba(255,255,255,0.05); padding: 8px; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; cursor: pointer;" data-action="select" data-action-id="${action.id}" data-option-email="${opt.email}" data-option-name="${opt.label}">Select: ${this._escapeHtml(opt.label)} &lt;${this._escapeHtml(opt.email)}&gt;</button>`;
+      });
+      optionsHtml += `</div>`;
+    }
+
+    const actionBtnsHtml = action.status === 'needs_disambiguation'
+      ? `${optionsHtml}
+         <div class="action-btns" data-action-id="${action.id}" style="margin-top: 12px; font-size: 0.9em; font-weight: bold; color: orange;">
+           ↑ Click a recipient above to draft the email, then you can Approve it.
+           <button class="action-btn cancel" data-action="cancel" data-action-id="${action.id}" style="margin-top: 8px;">✕ Cancel</button>
+         </div>`
+      : `<div class="action-btns" data-action-id="${action.id}">
+          <button class="action-btn confirm" data-action="confirm" data-action-id="${action.id}">✓ Approve</button>
+          ${action.intent === 'email' && (action.details.regenCount || 0) < 3 ? `<button class="action-btn regenerate" data-action="regenerate" data-action-id="${action.id}">🔄 Regenerate (${3 - (action.details.regenCount || 0)})</button>` : ''}
+          <button class="action-btn cancel" data-action="cancel" data-action-id="${action.id}">✕ Cancel</button>
+        </div>`;
+
     return `
       <div class="action-card" data-action-id="${action.id}">
         <div class="action-card-header">
@@ -198,10 +306,32 @@ export class ConversationManager {
           <div class="action-card-status-badge status-${action.status}">${statusIcon} ${this._formatStatus(action.status)}</div>
         </div>
         <div class="action-card-body">${this._escapeHtml(action.description || '')}</div>
+        ${action.followUp && action.status === 'needs_disambiguation' ? `<div style="font-size: 0.9em; margin-bottom: 8px; opacity: 0.9;">${this._escapeHtml(action.followUp)}</div>` : ''}
         ${detailsHtml}
-        <div class="action-btns" data-action-id="${action.id}">
-          <button class="action-btn confirm" data-action="confirm" data-action-id="${action.id}">✓ Confirm</button>
-          <button class="action-btn cancel" data-action="cancel" data-action-id="${action.id}">✕ Cancel</button>
+        ${actionBtnsHtml}
+      </div>
+    `;
+  }
+
+  /** Render reminder buttons */
+  _renderReminderButtons(reminderId) {
+    return `
+      <div class="reminder-btns" data-reminder-id="${reminderId}">
+        <button class="reminder-btn stop-alarm" data-action="stop" data-reminder-id="${reminderId}">⏹️ Stop Alarm</button>
+        <button class="reminder-btn reschedule" data-action="reschedule" data-reminder-id="${reminderId}">🔄 Reschedule</button>
+        <button class="reminder-btn mute" data-action="mute" data-reminder-id="${reminderId}">🔇 Mute</button>
+        <button class="reminder-btn settings" data-action="settings" data-reminder-id="${reminderId}">⚙️ Settings</button>
+        <button class="reminder-btn dismiss" data-action="dismiss" data-reminder-id="${reminderId}">✓ Dismiss</button>
+      </div>
+      <div class="reminder-settings-panel hidden" data-reminder-id="${reminderId}">
+        <div class="reminder-settings-title">Reminder Settings</div>
+        <div class="reminder-settings-row">
+          <button class="reminder-btn mute" data-action="mute" data-reminder-id="${reminderId}">🔇 Mute</button>
+          <button class="reminder-btn stop-alarm" data-action="stop" data-reminder-id="${reminderId}">⏹️ Stop Alarm</button>
+        </div>
+        <div class="reminder-settings-row">
+          <input class="reminder-reschedule-input" data-reminder-id="${reminderId}" placeholder="New time, e.g. in 10 minutes" />
+          <button class="reminder-btn reschedule-now" data-action="reschedule-now" data-reminder-id="${reminderId}">Set</button>
         </div>
       </div>
     `;
@@ -209,9 +339,10 @@ export class ConversationManager {
 
   /** Render extracted action details */
   _renderActionDetails(details) {
+    const hiddenKeys = ['raw', 'options'];
     const entries = Object.entries(details)
-      .filter(([k, v]) => k !== 'raw' && v)
-      .map(([k, v]) => `<span class="detail-item"><strong>${k}:</strong> ${this._escapeHtml(v)}</span>`)
+      .filter(([k, v]) => !hiddenKeys.includes(k) && v)
+      .map(([k, v]) => `<span class="detail-item" style="white-space: pre-wrap;"><strong>${k}:</strong> ${this._escapeHtml(v)}</span>`)
       .join('');
 
     return entries ? `<div class="action-details">${entries}</div>` : '';
@@ -224,20 +355,127 @@ export class ConversationManager {
       confirmed: 'Confirmed',
       cancelled: 'Cancelled',
       pending: 'Pending',
+      needs_disambiguation: 'Needs Disambiguation',
     };
     return labels[status] || status;
   }
 
-  /** Bind confirm/cancel button handlers */
+  /** Bind action buttons */
   _bindActionButtons(msgEl, action) {
     const confirmBtn = msgEl.querySelector(`.action-btn.confirm[data-action-id="${action.id}"]`);
     const cancelBtn = msgEl.querySelector(`.action-btn.cancel[data-action-id="${action.id}"]`);
+    const selectBtns = msgEl.querySelectorAll(`button.select-option[data-action-id="${action.id}"]`);
+    const regenBtn = msgEl.querySelector(`button.regenerate[data-action-id="${action.id}"]`);
 
     if (confirmBtn) {
       confirmBtn.addEventListener('click', () => this._handleActionConfirm(action.id, msgEl));
     }
     if (cancelBtn) {
       cancelBtn.addEventListener('click', () => this._handleActionCancel(action.id, msgEl));
+    }
+    selectBtns.forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const optionEmail = e.currentTarget.getAttribute('data-option-email');
+        const optionName = e.currentTarget.getAttribute('data-option-name');
+        this._handleActionSelect(action.id, optionEmail, optionName, msgEl);
+      });
+    });
+    if (regenBtn) {
+      regenBtn.addEventListener('click', () => this._handleRegenerate(action.id, msgEl));
+    }
+  }
+
+  /** Bind reminder buttons */
+  _bindReminderButtons(msgEl, reminderId) {
+    const stopBtn = msgEl.querySelector(`.reminder-btn.stop-alarm[data-reminder-id="${reminderId}"]`);
+    const rescheduleBtn = msgEl.querySelector(`.reminder-btn.reschedule[data-reminder-id="${reminderId}"]`);
+    const muteBtn = msgEl.querySelector(`.reminder-btn.mute[data-reminder-id="${reminderId}"]`);
+    const settingsBtn = msgEl.querySelector(`.reminder-btn.settings[data-reminder-id="${reminderId}"]`);
+    const rescheduleNowBtn = msgEl.querySelector(`.reminder-btn.reschedule-now[data-reminder-id="${reminderId}"]`);
+    const dismissBtn = msgEl.querySelector(`.reminder-btn.dismiss[data-reminder-id="${reminderId}"]`);
+
+    if (stopBtn) {
+      stopBtn.addEventListener('click', () => this._handleReminderStop(reminderId, msgEl));
+    }
+    if (rescheduleBtn) {
+      rescheduleBtn.addEventListener('click', () => this._handleReminderReschedule(reminderId, msgEl));
+    }
+    if (muteBtn) {
+      muteBtn.addEventListener('click', () => this._handleReminderMute(reminderId, msgEl));
+    }
+    if (settingsBtn) {
+      settingsBtn.addEventListener('click', () => this._toggleReminderSettings(reminderId, msgEl));
+    }
+    if (rescheduleNowBtn) {
+      rescheduleNowBtn.addEventListener('click', () => this._handleReminderRescheduleNow(reminderId, msgEl));
+    }
+    if (dismissBtn) {
+      dismissBtn.addEventListener('click', () => this._handleReminderDismiss(reminderId, msgEl));
+    }
+  }
+
+  /** Handle reminder reschedule */
+  _handleReminderReschedule(reminderId, msgEl) {
+    const newTime = prompt('Enter new reminder time (e.g., "in 10 minutes", "tomorrow at 3pm"):');
+    if (newTime) {
+      this.send(`Reschedule reminder ${reminderId} to ${newTime}`);
+    }
+  }
+
+  /** Handle immediate stop alarm */
+  _handleReminderStop(reminderId, msgEl) {
+    if (typeof window.stopReminderAlarm === 'function') {
+      window.stopReminderAlarm();
+    }
+    const stopBtn = msgEl.querySelector(`.reminder-btn.stop-alarm[data-reminder-id="${reminderId}"]`);
+    if (stopBtn) {
+      stopBtn.textContent = '✔️ Alarm Stopped';
+      stopBtn.disabled = true;
+    }
+  }
+
+  /** Toggle reminder settings panel */
+  _toggleReminderSettings(reminderId, msgEl) {
+    const panel = msgEl.querySelector(`.reminder-settings-panel[data-reminder-id="${reminderId}"]`);
+    if (!panel) return;
+    panel.classList.toggle('hidden');
+  }
+
+  /** Handle reschedule from panel input */
+  _handleReminderRescheduleNow(reminderId, msgEl) {
+    const input = msgEl.querySelector(`.reminder-reschedule-input[data-reminder-id="${reminderId}"]`);
+    if (!input || !input.value.trim()) {
+      alert('Please enter a new reminder time.');
+      return;
+    }
+    this.send(`Reschedule reminder ${reminderId} to ${input.value.trim()}`);
+  }
+
+  /** Handle reminder mute */
+  _handleReminderMute(reminderId, msgEl) {
+    window.reminderMuted = !window.reminderMuted;
+    const muteBtns = msgEl.querySelectorAll(`.reminder-btn.mute[data-reminder-id="${reminderId}"]`);
+    muteBtns.forEach(btn => {
+      btn.textContent = window.reminderMuted ? '🔊 Unmute' : '🔇 Mute';
+    });
+    if (window.reminderMuted && typeof window.stopReminderAlarm === 'function') {
+      window.stopReminderAlarm();
+    }
+    alert(`Reminders ${window.reminderMuted ? 'muted' : 'unmuted'}.`);
+  }
+
+  /** Handle reminder dismiss */
+  _handleReminderDismiss(reminderId, msgEl) {
+    const btns = msgEl.querySelector('.reminder-btns');
+    if (btns) {
+      btns.innerHTML = '<span style="color: green;">✓ Dismissed</span>';
+    }
+    const panel = msgEl.querySelector(`.reminder-settings-panel[data-reminder-id="${reminderId}"]`);
+    if (panel) {
+      panel.classList.add('hidden');
+    }
+    if (typeof window.stopReminderAlarm === 'function') {
+      window.stopReminderAlarm();
     }
   }
 
@@ -259,12 +497,51 @@ export class ConversationManager {
       if (resp.ok) {
         // Update the card UI
         this._updateActionCard(card, 'confirmed', data.result?.message || 'Action completed!');
+        
+        // If the backend provided a deep link (like wa.me), open it!
+        if (data.result?.url) {
+          window.open(data.result.url, '_blank');
+        }
       } else {
         this._updateActionCard(card, 'error', data.error || 'Failed to confirm.');
       }
     } catch (err) {
       console.error('[VoxFlow] Action confirm error:', err);
       this._updateActionCard(card, 'error', 'Network error. Please try again.');
+    }
+  }
+
+  /** Handle action selection (disambiguation) */
+  async _handleActionSelect(actionId, optionEmail, optionName, msgEl) {
+    const card = msgEl.querySelector(`.action-card[data-action-id="${actionId}"]`);
+    const optionsList = card?.querySelector('.action-options-list');
+    if (optionsList) optionsList.innerHTML = '<span class="action-loading">Selecting...</span>';
+
+    try {
+      const resp = await fetch('/api/action/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actionId, selectedEmail: optionEmail, selectedName: optionName, sessionId: this.sessionId }),
+      });
+
+      const data = await resp.json();
+
+      if (resp.ok) {
+        // We completely re-render the card body because details have updated.
+        // It's simpler to just indicate success directly or add a message.
+        // For VoxFlow, we can just replace the parent's message entirely, but here we just update UI.
+        const parent = card.parentNode;
+        parent.removeChild(card);
+        // data.action has the updated action
+        const newCardHtml = this._renderActionCard(data.action);
+        parent.innerHTML = parent.innerHTML + newCardHtml;
+        this._bindActionButtons(parent, data.action);
+      } else {
+         if (optionsList) optionsList.innerHTML = `<span class="action-result error">⚠️ ${this._escapeHtml(data.error || 'Failed to select.')}</span>`;
+      }
+    } catch (err) {
+      console.error('[VoxFlow] Action select error:', err);
+      if (optionsList) optionsList.innerHTML = '<span class="action-result error">⚠️ Network error. Please try again.</span>';
     }
   }
 
@@ -290,6 +567,45 @@ export class ConversationManager {
     } catch (err) {
       console.error('[VoxFlow] Action cancel error:', err);
       this._updateActionCard(card, 'error', 'Network error. Please try again.');
+    }
+  }
+
+  /** Handle action regeneration */
+  async _handleRegenerate(actionId, msgEl) {
+    const card = msgEl.querySelector(`.action-card[data-action-id="${actionId}"]`);
+    const btn = card?.querySelector('.regenerate');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '🔄 Regenerating...';
+    }
+
+    try {
+      const resp = await fetch('/api/action/regenerate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actionId, sessionId: this.sessionId }),
+      });
+      const data = await resp.json();
+
+      if (resp.ok) {
+        // Find message-content wrapper
+        const parent = card.parentNode;
+        parent.removeChild(card);
+        const newCardHtml = this._renderActionCard(data.action);
+        parent.innerHTML = parent.innerHTML + newCardHtml;
+        this._bindActionButtons(parent, data.action);
+      } else {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '⚠️ Failed to regenerate';
+        }
+      }
+    } catch (err) {
+      console.error('[VoxFlow] Action regenerate failed:', err);
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '⚠️ Network error';
+      }
     }
   }
 
@@ -323,6 +639,9 @@ export class ConversationManager {
         btnsArea.innerHTML = `<div class="action-result error">⚠️ ${this._escapeHtml(resultMessage)}</div>`;
       }
     }
+
+    // Action cards can grow after confirm/cancel; keep latest content visible above the fixed input bar.
+    this._scrollToBottom();
   }
 
   /** Render debug panel (hidden by default, toggled via header switch) */
@@ -385,10 +704,7 @@ export class ConversationManager {
     el.id = 'typingIndicator';
     el.innerHTML = `
       <div class="message-avatar">
-        <svg viewBox="0 0 32 32" fill="none">
-          <circle cx="16" cy="16" r="14" stroke="url(#avatarGrad)" stroke-width="2" fill="none"/>
-          <circle cx="16" cy="16" r="4" fill="url(#avatarGrad)"/>
-        </svg>
+        <img src="/logo.jpeg" alt="VoxFlow" class="avatar-logo" />
       </div>
       <div class="message-content">
         <div class="typing-indicator">
@@ -416,5 +732,36 @@ export class ConversationManager {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  /**
+   * Clear all stored memory for this session.
+   * @returns {Promise<boolean>} True if memory was cleared successfully
+   */
+  async clearMemory() {
+    try {
+      const resp = await fetch(`/api/memory/${encodeURIComponent(this.sessionId)}`, {
+        method: 'DELETE',
+      });
+
+      if (!resp.ok) {
+        console.error('[VoxFlow] Failed to clear memory:', resp.status);
+        return false;
+      }
+
+      const data = await resp.json();
+      console.log('[VoxFlow] Memory cleared:', data);
+
+      // Show a confirmation message in the chat
+      this._renderMessage('assistant', '🧠 Memory cleared! I\'ve forgotten our previous conversations. We\'re starting fresh.', {
+        toolUsed: 'memory',
+        queryType: 'GENERAL',
+      });
+
+      return true;
+    } catch (err) {
+      console.error('[VoxFlow] Memory clear error:', err);
+      return false;
+    }
   }
 }
